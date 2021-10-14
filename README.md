@@ -7,4 +7,4 @@
 - Alessio
 - Akanksha
 
-![Screenshot](screenshot.png)
+![Screenshot](screenshot.jpg)
