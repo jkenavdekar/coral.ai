@@ -1,0 +1,45 @@
+
+var START_DATE = '2021-01-01';
+var END_DATE = '2021-06-01';
+var CLOUD_THRES = 40;
+
+var S2data = ee.ImageCollection('COPERNICUS/S2_SR')
+  .filterDate(ee.Date(START_DATE), ee.Date(END_DATE))
+  .filterBounds(POI)
+  .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', CLOUD_THRES))
+
+var S2composite = S2data.median()
+
+Map.centerObject(POI, 12);
+var visParams = {min: 0, max: 2500, gamma: 1.1, bands: ['B4', 'B3', 'B2']};
+Map.addLayer(S2composite, visParams, 'Sentinel 2 2020 composite');
+
+
+var training = corals.merge(sand);
+print(training)
+
+var label = 'Class';
+var bands = ['B2', 'B3', 'B4'];
+
+var input = S2composite.select(bands);
+
+var trainImage = input.sampleRegions({
+  collection: training,
+  properties: [label],
+  scale: 30
+});
+
+
+var trainData = trainImage.randomColumn();
+var trainSet = trainData.filter(ee.Filter.lessThan('random', 0.9));
+var testSet = trainData.filter(ee.Filter.greaterThanOrEquals('random', 0.9));
+
+var classifier = ee.Classifier.smileCart().train(trainSet, label, bands);
+
+var classified = input.classify(classifier);
+
+var coralArea = ['FF8000', '969696'];
+
+Map.addLayer(classified, {palette: coralArea, min: 0, max: 4}, 'Classification CART');
+
+

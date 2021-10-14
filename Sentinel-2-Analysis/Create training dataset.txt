@@ -1,0 +1,175 @@
+// Script to create training and validation data from Sentinel 2 data within polygons in Belize
+
+// Adding more classes? See comments starting with ** in script below...
+// Using high-resolution data to aid drawing? See comment below 'Outputs'
+/* 
+
+Requirements (Imports needed above)
+  'POI'         = Point of interest
+  'seagrass'    = Draw polygon of areas below, import as FeatureCollection, add property 'cover'+ value
+  'sand'        = Draw polygon of areas below, import as FeatureCollection, add property 'cover'+ value
+  'coral'       = Draw polygon of areas below, import as FeatureCollection, add property 'cover'+ value
+  'deepwater'   = Draw polygon of areas below, import as FeatureCollection, add property 'cover'+ value
+  'bathymetry'  = Image of satellite derived bathymetry - import from Assets [left] (See 'Estimate_bathymetry_xxx')
+
+Parameters:                                                   Defaults
+  'START_DATE'            = yyyy-mm-dd                          2020-01-01
+  'END_DATE'              = yyyy-mm-dd                          2020-12-01
+  'MAX_CLOUD_PROBABILITY' = threshold to mask clouds            8 (8% cloud probability)
+  'split'                 = Ratio of training/validation data   0.7 (70% training, 30% Validation)
+  'importImagery'         = True/False, is high res data being  False
+                            imported to create training data?
+  'pointsInClass'         = Cover class number, Number of       Seagrass = [3, 7000],
+                            points extracted from each          Sand = [2, 7000],
+                            class (e.g. seagrass) in            Coral = [1, 2000],
+                            ground truth dataset                Deep = [0, 1000]
+Output:
+  'descriptTraining'       = description of output features    'CME_Workshop_Training_data_for_Belize',
+  'assetIdTraining'        = id of output features             'CME_Workshop_Training_data_for_Belize',
+  'descriptValidation'     = description of output features    'CME_Workshop_Validation_data_for_Belize',
+  'assetIdValidation'      = id of output features             'CME_Workshop_Validation_data_for_Belize',
+*/
+
+// Parameters
+var START_DATE             = '2020-01-01';
+var END_DATE               = '2020-12-01';
+var MAX_CLOUD_PROBABILITY  = 8;
+var split                  = 0.7;
+var pointsInSeagrass       = [3, 7000];
+var pointsInSand           = [2, 7000];
+var pointsInCoral          = [1, 1000];
+var pointsInDeep           = [0, 1000];
+// ** Add more 'pointsInXXX' if adding classes
+
+// Outputs
+var descriptTraining    = 'Train_dataset_belize_2';
+var assetIdTraining     = 'Train_dataset_belize_2';
+var descriptValidation  = 'Validation_dataset_belize_2';
+var assetIdValidation   = 'Validation_dataset_belize_2';
+
+
+// Importing High-resolution data?
+// Remove '//' in next two lines below & add imported data E.g. Map.addLayer(LIDAR) 
+//bands ['b1', 'b2', 'b3'] correlate to ['red', 'green', 'blue'];
+
+Map.addLayer(highres, {min: 0, max: 200, bands: ['b1', 'b2', 'b3']}, 'High-res data') 
+
+//  ------------------------------------------------------------------   //
+
+// Create Sentinel 2 composite //
+
+var s2Sr = ee.ImageCollection('COPERNICUS/S2_SR');
+var s2Clouds = ee.ImageCollection('COPERNICUS/S2_CLOUD_PROBABILITY');
+
+function maskClouds(img) {
+  var clouds = ee.Image(img.get('cloud_mask')).select('probability');
+  var isNotCloud = clouds.lt(MAX_CLOUD_PROBABILITY);
+  return img.updateMask(isNotCloud);
+}
+
+// Filter input collections by desired data range and region.
+var criteria = ee.Filter.and(
+    ee.Filter.bounds(POI), ee.Filter.date(ee.Date(START_DATE), ee.Date(END_DATE)));
+s2Sr = s2Sr.filter(criteria);
+s2Clouds = s2Clouds.filter(criteria);
+
+// Join S2 SR with cloud probability dataset to add cloud mask.
+var s2SrWithCloudMask = ee.Join.saveFirst('cloud_mask').apply({
+  primary: s2Sr,
+  secondary: s2Clouds,
+  condition:
+      ee.Filter.equals({leftField: 'system:index', rightField: 'system:index'})
+});
+
+var s2CloudMasked = ee.ImageCollection(s2SrWithCloudMask).map(maskClouds).median();
+var rgbVis = {min: 0, max: 3000, bands: ['B4', 'B3', 'B2']};
+Map.centerObject(POI, 12);
+Map.addLayer(s2CloudMasked, {min: 0, max: 3000, bands: ['B4', 'B3', 'B2']}, 'Sentinel 2 composite')
+
+//  ------------------------------------------------------------------   //
+
+// Create training and validation points //
+
+// Merge ground truth data
+// ** ADD '.merge(extraClass)' below, if adding more classes **
+var trainingPolygons = seagrass.merge(sand).merge(coral).merge(deepwater);
+
+// Rename Bands
+var belize_rgbd = s2CloudMasked.select(['B2', 'B3', 'B4'], ['blue', 'green', 'red']);
+
+// Select bands for classification
+var bands = ['blue', 'green', 'red'];
+
+// Get the values for all pixels in each polygon in the training.
+var training = belize_rgbd.select(bands).sampleRegions({
+  // Get the sample from the polygons FeatureCollection.
+  collection: trainingPolygons,
+  // Keep this list of properties from the polygons.
+  properties: ['cover'],
+  // Set the scale to get Sentinel pixels in the polygons.
+  scale: 10,
+  geometries: true,
+  tileScale: 16
+});
+
+// Retrieve List of Cover Classes
+var classList = ee.List(trainingPolygons.aggregate_array('cover')).distinct()
+print('Cover Classes in Training: ', classList)
+
+//  ------------------------------------------------------------------   //
+
+// Extract Training Sample into random even classes
+// ** ADD extra 5 lines as below when ('cover', n) if adding more classes **
+// Deep-water
+var filterdeep = ee.Filter.eq('cover', pointsInDeep[0]);
+var deepPoints1 = training.filter(filterdeep).randomColumn('random').sort('random').limit(pointsInDeep[1]);
+var deepPoints2 = deepPoints1.randomColumn('random').sort('random')
+var deeptrain = deepPoints2.filter(ee.Filter.lt('random', split));
+var deepvalid = deepPoints2.filter(ee.Filter.gte('random', split));
+
+// Coral
+var filtercoral = ee.Filter.eq('cover', pointsInCoral[0]);
+var coralPoints1 = training.filter(filtercoral).randomColumn('random').sort('random').limit(pointsInCoral[1]);
+var coralPoints2 = coralPoints1.randomColumn('random').sort('random')
+var coraltrain = coralPoints2.filter(ee.Filter.lt('random', split));
+var coralvalid = coralPoints2.filter(ee.Filter.gte('random', split));
+
+// Sand
+var filterSand = ee.Filter.eq('cover', pointsInSand[0]);
+var sandPoints1 = training.filter(filterSand).randomColumn('random').sort('random').limit(pointsInSand[1]);
+var sandPoints2 = sandPoints1.randomColumn('random').sort('random')
+var sandtrain = sandPoints2.filter(ee.Filter.lt('random', split));
+var sandvalid = sandPoints2.filter(ee.Filter.gte('random', split));
+
+// Seagrass
+var filterSeagrass = ee.Filter.eq('cover', pointsInSeagrass[0]);
+var seagrassPoints1 = training.filter(filterSeagrass).randomColumn('random').sort('random').limit(pointsInSeagrass[1]);
+var seagrassPoints2 = seagrassPoints1.randomColumn('random').sort('random')
+var seagrasstrain = seagrassPoints2.filter(ee.Filter.lt('random', split));
+var seagrassvalid = seagrassPoints2.filter(ee.Filter.gte('random', split));
+
+// Merge sample points
+// ** ADD '.merge(extraClassTrain)' to the line below, if adding more classes **
+var training = deeptrain.merge(sandtrain).merge(seagrasstrain).merge(coraltrain);
+// ** ADD '.merge(extraClassValid)' to the line below, if adding more classes **
+var validation = deepvalid.merge(coralvalid).merge(sandvalid).merge(seagrassvalid);
+
+print('Number of points in training: ', training.size())
+print('Number of points in validation: ', validation.size())
+
+//  ------------------------------------------------------------------   //
+
+// Export an ee.FeatureCollection as an Earth Engine asset.
+Export.table.toAsset({
+  collection: training,
+  description:descriptTraining,
+  assetId: assetIdTraining,
+});
+
+// Export an ee.FeatureCollection as an Earth Engine asset.
+Export.table.toAsset({
+  collection: validation,
+  description: descriptValidation,
+  assetId: assetIdValidation,
+});
+
